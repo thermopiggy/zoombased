@@ -89,6 +89,33 @@
     /* “Focus” pulse on hotspots when zoomed near */
     .hotspot.focus { box-shadow:0 0 0 8px rgba(255,255,255,.08), 0 0 0 0 rgba(255,255,255,.2); animation:pulse 1.6s ease-out infinite }
     @keyframes pulse{ 0%{ box-shadow:0 0 0 8px rgba(255,255,255,.10),0 0 0 0 rgba(255,255,255,.35)} 100%{ box-shadow:0 0 0 16px rgba(255,255,255,0),0 0 0 10px rgba(255,255,255,0)} }
+
+    /* A11y focus */
+    .hotspot:focus-visible{ outline:2px solid #0d6efd; outline-offset:2px }
+
+    /* Граб курсор при пан */
+    #world{ cursor:grab }
+    #world.dragging{ cursor:grabbing }
+
+    /* Reduce motion */
+    @media (prefers-reduced-motion: reduce){
+      #map{ transition:none !important }
+      .panel{ transition:none !important }
+      .hotspot{ transition:none !important }
+    }
+
+    /* Toast (малък текст-описание при zoom) */
+    #toast{
+      position:absolute; left:50%; bottom:1rem; translate:-50% 0;
+      background:rgba(0,0,0,.7); color:#fff; padding:.5rem .8rem;
+      border:1px solid rgba(255,255,255,.2); border-radius:10px;
+      font-size:.95rem; opacity:0; pointer-events:none; z-index:7;
+      transition:opacity .25s ease, transform .25s ease;
+      transform:translateY(6px);
+      max-width:min(86vw,520px); text-align:center;
+      backdrop-filter:blur(6px);
+    }
+    #toast.show{ opacity:1; transform:translateY(0) }
   </style>
 </head>
 <body>
@@ -109,10 +136,10 @@
       <img id="map" src="aerial-snowpark.webp" alt="Aerial of ski area with park, pistes, beginner area and off-piste" loading="eager" />
 
       <!-- Hotspots (позиции в % спрямо изображението) -->
-      <button class="hotspot" style="left:62%;top:58%;" data-id="park" data-x="62" data-y="58" data-scale="2.7" aria-label="Фън парк">Фън парк</button>
-      <button class="hotspot" style="left:48%;top:70%;" data-id="piste" data-x="48" data-y="70" data-scale="2.5" aria-label="Писта">Писта</button>
-      <button class="hotspot" style="left:28%;top:64%;" data-id="beginner" data-x="28" data-y="64" data-scale="2.8" aria-label="Учебна">Учебна</button>
-      <button class="hotspot" style="left:78%;top:32%;" data-id="off" data-x="78" data-y="32" data-scale="3.0" aria-label="Извън писта">Извън писта</button>
+      <button class="hotspot" style="left:62%;top:58%;" data-id="park" data-x="62" data-y="58" data-scale="2.7" data-title="Фън парк" data-desc="Freestyle прогресии: боксове, рейлове, малки/средни кикъри. Първи скокове безопасно." aria-label="Фън парк">Фън парк</button>
+      <button class="hotspot" style="left:48%;top:70%;" data-id="piste" data-x="48" data-y="70" data-scale="2.5" data-title="Писта" data-desc="Стабилни завои, контрол на скоростта и безопасност в натоварени участъци." aria-label="Писта">Писта</button>
+      <button class="hotspot" style="left:28%;top:64%;" data-id="beginner" data-x="28" data-y="64" data-scale="2.8" data-title="Учебна площадка" data-desc="Пързаляне, стоп, S-завои и лифт етика. Идеално за първи ден." aria-label="Учебна">Учебна</button>
+      <button class="hotspot" style="left:78%;top:32%;" data-id="off" data-x="78" data-y="32" data-scale="3.0" data-title="Извън писта" data-desc="Оценка на склон, линия и безопасност. Само при подходящи условия." aria-label="Извън писта">Извън писта</button>
     </div>
 
     <!-- Panels (показват се при zoom към секция) -->
@@ -162,6 +189,9 @@
       <button id="reset" aria-label="Върни началото">↺ Начало</button>
       <div class="hint">Щракни върху зона за zoom. Двоен клик/тап – начало. Колелце – плавен zoom.</div>
     </div>
+
+    <!-- Toast -->
+    <div id="toast" role="status" aria-live="polite"></div>
   </div>
 
   <script>
@@ -171,6 +201,7 @@
     const resetBtn = document.getElementById('reset');
     const home = document.getElementById('homeLink');
     const darkToggle = document.getElementById('darkToggle');
+    const toast = document.getElementById('toast');
     const panels = {
       park: document.getElementById('panel-park'),
       piste: document.getElementById('panel-piste'),
@@ -182,9 +213,38 @@
     const maxScale = 4.5;
     const focusThreshold = 0.12; // допустимо отклонение до центъра (в нормализирани единици)
 
+    // ----- helpers -----
+    function showToast(title, desc){
+      toast.textContent = title ? `${title} — ${desc}` : desc;
+      toast.classList.add('show');
+      clearTimeout(showToast._t);
+      showToast._t = setTimeout(()=>toast.classList.remove('show'), 2000);
+    }
+
+    // Ограничаване: да не изпускаме картата извън екрана
+    function clampView() {
+      const vw = world.clientWidth, vh = world.clientHeight;
+      const rect = img.getBoundingClientRect();
+      const w = rect.width, h = rect.height;
+      const minTx = vw - w, maxTx = 0;
+      const minTy = vh - h, maxTy = 0;
+      tx = Math.min(maxTx, Math.max(minTx, tx));
+      ty = Math.min(maxTy, Math.max(minTy, ty));
+    }
+
+    function saveState(){ sessionStorage.setItem('sb_state', JSON.stringify({ scale, tx, ty })) }
+    function loadState(){
+      const s = sessionStorage.getItem('sb_state');
+      if (s){
+        try{ const v = JSON.parse(s); scale=v.scale||1; tx=v.tx||0; ty=v.ty||0; }catch{}
+      }
+    }
+
     function applyTransform() {
+      clampView();
       img.style.transform = `translate3d(${tx}px, ${ty}px, 0) scale(${scale})`;
       syncProximityUI();
+      saveState();
     }
 
     function resetView(instant = false) {
@@ -194,13 +254,14 @@
       if (instant) requestAnimationFrame(() => img.style.transition = '');
       hideAllPanels();
       unfocusAll();
+      saveState();
     }
 
     function hideAllPanels(){ Object.values(panels).forEach(p => p.classList.remove('show')) }
     function unfocusAll(){ document.querySelectorAll('.hotspot').forEach(h=>h.classList.remove('focus')) }
 
     // Zoom to % coords
-    function zoomTo(percentX, percentY, newScale) {
+    function zoomTo(percentX, percentY, newScale, meta) {
       const vw = world.clientWidth, vh = world.clientHeight;
       const rect = img.getBoundingClientRect();
       const currentWidth = rect.width, currentHeight = rect.height;
@@ -212,6 +273,11 @@
       tx = vw/2 - targetX * scale;
       ty = vh/2 - targetY * scale;
       applyTransform();
+
+      // Показване на кратко описание, ако има метаданни от бутон
+      if (meta && (meta.title || meta.desc)) {
+        showToast(meta.title || '', meta.desc || '');
+      }
     }
 
     // Panels auto-show when close & zoomed
@@ -233,6 +299,10 @@
           if (panels[id] && !shown){
             hideAllPanels();
             panels[id].classList.add('show');
+            // показваме и toast при автоматично показване
+            const title = h.dataset.title || h.textContent.trim();
+            const desc = h.dataset.desc || '';
+            showToast(title, desc);
             shown = true;
           }
         } else {
@@ -249,7 +319,7 @@
       const x = parseFloat(btn.dataset.x);
       const y = parseFloat(btn.dataset.y);
       const s = parseFloat(btn.dataset.scale) || 2.5;
-      zoomTo(x, y, s);
+      zoomTo(x, y, s, { title: btn.dataset.title || btn.textContent.trim(), desc: btn.dataset.desc || '' });
     });
 
     // dblclick / double tap => reset
@@ -261,23 +331,79 @@
       lastTap = now;
     });
 
-    // Drag-pan when zoomed
+    // ----- Drag-pan when zoomed -----
     let dragging = false, startX=0, startY=0, startTx=0, startTy=0, activeId=null;
     world.addEventListener('pointerdown', (e) => {
       activeId = e.pointerId;
-      if (scale <= 1) return;
+      if (scale <= 1) return; // пан само при зум
       dragging = true; world.setPointerCapture(activeId);
+      world.classList.add('dragging');
       startX = e.clientX; startY = e.clientY; startTx = tx; startTy = ty;
     });
     world.addEventListener('pointermove', (e) => {
       if (!dragging || e.pointerId!==activeId) return;
-      tx = startTx + (e.clientX - startX);
-      ty = startTy + (e.clientY - startY);
-      applyTransform();
+      // ако има два пръста, pinch блокът ще се погрижи
+      if (e.pointerType === 'mouse' || (e.pointerType === 'touch' && touches.size <= 1)){
+        tx = startTx + (e.clientX - startX);
+        ty = startTy + (e.clientY - startY);
+        applyTransform();
+      }
     });
     world.addEventListener('pointerup', (e) => {
-      if (e.pointerId===activeId){ dragging = false; activeId=null; }
+      if (e.pointerId===activeId){
+        dragging = false; activeId=null; world.releasePointerCapture(e.pointerId);
+        world.classList.remove('dragging');
+        applyTransform(); // финално ограничаване
+      }
     });
+
+    // ----- Pinch zoom -----
+    const touches = new Map();
+    let pinchStartDist = 0, pinchStartScale = 1, pinchCx = 0, pinchCy = 0;
+
+    function dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y) }
+    function centroid(a,b){ return { x:(a.x+b.x)/2, y:(a.y+b.y)/2 } }
+
+    world.addEventListener('pointerdown', (e) => {
+      touches.set(e.pointerId, { x:e.clientX, y:e.clientY });
+      if (touches.size === 2){
+        // Старт на pinch
+        const [t1, t2] = [...touches.values()];
+        pinchStartDist = dist(t1, t2);
+        pinchStartScale = scale;
+        const rect = img.getBoundingClientRect();
+        const c = centroid(t1, t2);
+        pinchCx = c.x - rect.left;
+        pinchCy = c.y - rect.top;
+      }
+    });
+
+    world.addEventListener('pointermove', (e) => {
+      if (touches.has(e.pointerId)){
+        touches.set(e.pointerId, { x:e.clientX, y:e.clientY });
+      }
+      // Pinch при два пръста
+      if (touches.size === 2){
+        const [a, b] = [...touches.values()];
+        const d = dist(a, b);
+        if (pinchStartDist > 0){
+          scale = Math.min(maxScale, Math.max(1, (d / pinchStartDist) * pinchStartScale));
+          const rect = img.getBoundingClientRect();
+          const c = centroid(a, b);
+          tx = c.x - (pinchCx * scale);
+          ty = c.y - (pinchCy * scale);
+          applyTransform();
+        }
+      }
+    });
+
+    world.addEventListener('pointerup', (e) => {
+      touches.delete(e.pointerId);
+      if (touches.size < 2){
+        pinchStartDist = 0;
+      }
+    });
+    world.addEventListener('pointercancel', (e)=>{ touches.delete(e.pointerId); pinchStartDist=0; });
 
     // Wheel zoom around cursor
     world.addEventListener('wheel', (e) => {
@@ -286,8 +412,8 @@
       const cx = e.clientX - rect.left;
       const cy = e.clientY - rect.top;
 
-      const prev = scale;
       const delta = Math.sign(e.deltaY) * -0.15;
+      const prevScale = scale;
       scale = Math.min(maxScale, Math.max(1, scale + delta));
 
       // keep cursor point stable during zoom
@@ -313,9 +439,33 @@
       b.addEventListener('click', ()=>resetView());
     });
 
+    // Deep links by hash (#park/#piste/...)
+    function openById(id){
+      const el = document.querySelector(`.hotspot[data-id="${id}"]`);
+      if (!el) return;
+      const x = parseFloat(el.dataset.x), y = parseFloat(el.dataset.y), s = parseFloat(el.dataset.scale)||2.5;
+      zoomTo(x,y,s,{ title: el.dataset.title || el.textContent.trim(), desc: el.dataset.desc || '' });
+      hideAllPanels();
+      if (panels[id]) panels[id].classList.add('show');
+    }
+    window.addEventListener('hashchange', () => {
+      const id = location.hash.replace('#','');
+      if (id) openById(id);
+    });
+    document.querySelectorAll('.hotspot').forEach(h=>{
+      h.addEventListener('click', ()=>{ history.replaceState(null,'',`#${h.dataset.id}`) });
+    });
+
+    // Persist state за сесията
+    function loadStateAndApply(){
+      loadState();
+      applyTransform();
+      syncProximityUI();
+    }
+
     // Init
-    if (img.complete) resetView(true);
-    else img.addEventListener('load', () => resetView(true));
+    if (img.complete){ loadStateAndApply(); }
+    else img.addEventListener('load', () => { loadStateAndApply(); });
   })();
   </script>
 </body>
